@@ -1,44 +1,56 @@
-// Vercel Serverless Function
-// 该函数会接收来自插件的请求，然后安全地调用Google AI API
+// Vercel Edge Function for streaming responses
+// 必须在 Vercel 项目设置中将此函数切换到 Edge 运行时
+export const config = {
+  runtime: 'edge',
+};
 
-export default async function handler(request, response) {
-  // 只允许POST请求
-  if (request.method !== 'POST') {
-    return response.status(405).json({ error: 'Method Not Allowed' });
+export default async function handler(req) {
+  if (req.method !== 'POST') {
+    return new Response(JSON.stringify({ error: 'Method Not Allowed' }), {
+      status: 405,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
-  // 从Vercel的环境变量中安全地获取API密钥，这个密钥不会暴露在前端
-  // 注意：这里的API Key是我们自己提供的，无需用户配置
-  const geminiApiKey = process.env.GEMINI_API_KEY; 
+  const geminiApiKey = process.env.GEMINI_API_KEY;
   if (!geminiApiKey) {
-    return response.status(500).json({ error: 'API key not configured on server' });
+    return new Response(JSON.stringify({ error: 'API key not configured' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${geminiApiKey}`;
+  // 使用流式生成内容的API端点
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:streamGenerateContent?key=${geminiApiKey}`;
 
   try {
-    // 将插件发来的请求体直接转发给Google
+    const requestBody = await req.json();
+
     const geminiResponse = await fetch(apiUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(request.body), 
+      body: JSON.stringify(requestBody),
     });
 
-    // 如果Google返回错误，将错误信息也转发回插件，方便调试
     if (!geminiResponse.ok) {
-      const errorBody = await geminiResponse.text();
-      console.error("Gemini API Error:", errorBody);
-      return response.status(geminiResponse.status).json({ error: `Google API error: ${geminiResponse.statusText}` });
+      const errorText = await geminiResponse.text();
+      return new Response(errorText, { status: geminiResponse.status });
     }
 
-    // 成功后，将Google的返回结果转发回插件
-    const data = await geminiResponse.json();
-    return response.status(200).json(data);
+    // 将 Gemini 的流式响应直接传回给客户端
+    return new Response(geminiResponse.body, {
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+      },
+    });
 
   } catch (error) {
     console.error('Proxy internal error:', error);
-    return response.status(500).json({ error: 'Internal Server Error in proxy' });
+    return new Response(JSON.stringify({ error: 'Internal Server Error' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 }
