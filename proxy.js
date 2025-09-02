@@ -1,7 +1,11 @@
 // 使用 Node.js 运行时，因为它更适合处理长时任务
-// 删除文件顶部的 export const config = { runtime: 'edge' };
+// 请确保此文件顶部没有 export const config = { runtime: 'edge' };
 
 export default async function handler(req, res) {
+  // 增加函数运行时长限制 (Vercel Pro plan needed for >60s)
+  // 对于免费版，这会尽量延长到最大允许时间
+  res.setHeader('X-Vercel-Max-Duration', '60');
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
@@ -15,7 +19,7 @@ export default async function handler(req, res) {
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:streamGenerateContent?key=${geminiApiKey}`;
 
   try {
-    const requestBody = req.body; // Vercel 会自动解析 JSON body
+    const requestBody = req.body; // Vercel 在 Node.js 环境会自动解析 JSON
 
     const geminiResponse = await fetch(apiUrl, {
       method: 'POST',
@@ -30,33 +34,39 @@ export default async function handler(req, res) {
       return res.status(geminiResponse.status).json({ error: `Gemini API Error: ${errorText}` });
     }
 
-    // 在服务器端处理流并聚合结果
+    // 在服务器端稳定地处理流并聚合结果
     const reader = geminiResponse.body.getReader();
     const decoder = new TextDecoder();
     let fullText = '';
+    let buffer = '';
 
     while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         
-        const chunk = decoder.decode(value, { stream: true });
+        buffer += decoder.decode(value, { stream: true });
         
-        // 移除Google流式API返回的特殊字符 `[` 和 `]`
-        const cleanedChunk = chunk.replace(/^\[|\]$/g, '');
-        
-        // 分割可能存在的多个JSON对象
-        cleanedChunk.split('\n').forEach(line => {
-           if (line.trim()) {
-               try {
-                   const data = JSON.parse(line);
-                   if (data && data.candidates && data.candidates[0].content) {
-                       fullText += data.candidates[0].content.parts[0].text;
-                   }
-               } catch (parseError) {
-                   // 忽略无法解析的行
-               }
-           }
-        });
+        // 尝试从buffer中分割出完整的JSON块
+        // Google的流返回的是一个JSON数组，以`[`开始，以`]`结束
+        // 我们需要找到闭合的JSON对象
+        let endOfJsonObject = buffer.lastIndexOf('}');
+        if (endOfJsonObject !== -1) {
+            let processableChunk = buffer.substring(0, endOfJsonObject + 1);
+            buffer = buffer.substring(endOfJsonObject + 1);
+
+            // 清理并解析
+            const jsonObjects = `[${processableChunk.replace(/,$/, '')}]`;
+            try {
+                const data = JSON.parse(jsonObjects);
+                data.forEach(item => {
+                    if (item.candidates && item.candidates[0].content) {
+                        fullText += item.candidates[0].content.parts[0].text;
+                    }
+                });
+            } catch (e) {
+                // 忽略解析错误，等待更多数据
+            }
+        }
     }
 
     if (!fullText) {
