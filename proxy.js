@@ -34,47 +34,57 @@ export default async function handler(req, res) {
       return res.status(geminiResponse.status).json({ error: `Gemini API Error: ${errorText}` });
     }
 
-    // 在服务器端稳定地处理流并聚合结果
-    const reader = geminiResponse.body.getReader();
-    const decoder = new TextDecoder();
-    let fullText = '';
-    let buffer = '';
+  // proxy.js
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        
-        buffer += decoder.decode(value, { stream: true });
-        
-        // 尝试从buffer中分割出完整的JSON块
-        // Google的流返回的是一个JSON数组，以`[`开始，以`]`结束
-        // 我们需要找到闭合的JSON对象
-        let endOfJsonObject = buffer.lastIndexOf('}');
-        if (endOfJsonObject !== -1) {
-            let processableChunk = buffer.substring(0, endOfJsonObject + 1);
-            buffer = buffer.substring(endOfJsonObject + 1);
+// ... (try 块内部)
 
-            // 清理并解析
-            const jsonObjects = `[${processableChunk.replace(/,$/, '')}]`;
-            try {
-                const data = JSON.parse(jsonObjects);
-                data.forEach(item => {
-                    if (item.candidates && item.candidates[0].content) {
-                        fullText += item.candidates[0].content.parts[0].text;
-                    }
-                });
-            } catch (e) {
-                // 忽略解析错误，等待更多数据
-            }
+// 在服务器端稳定地处理流并聚合结果
+const reader = geminiResponse.body.getReader();
+const decoder = new TextDecoder();
+let chunks = [];
+
+while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(decoder.decode(value, { stream: true }));
+}
+
+// Gemini 的流式响应是一个分块的JSON数组
+// 我们将所有块拼接起来，清理开头和结尾可能存在的 "data: " 或其他非JSON字符
+// 然后尝试解析这个完整的JSON数组
+let fullText = '';
+try {
+    // 拼接所有块并清理
+    const fullResponseText = chunks.join('');
+    
+    // 移除流开头和结尾可能存在的方括号和换行符，以防万一
+    const cleanedText = fullResponseText.replace(/^\[\s*|\s*\]$/g, '');
+
+    // 流返回的是一系列独立的 JSON 对象，用逗号分隔，我们把它们重新包装成一个数组
+    const jsonArrayString = `[${cleanedText}]`;
+    
+    const data = JSON.parse(jsonArrayString);
+    data.forEach(item => {
+        if (item.candidates && item.candidates[0].content) {
+            fullText += item.candidates[0].content.parts[0].text;
         }
-    }
+    });
+} catch (e) {
+    console.error('Failed to parse Gemini stream:', e);
+    console.error('Raw response text:', chunks.join(''));
+    return res.status(500).json({ error: 'Failed to parse content from Gemini stream.' });
+}
 
-    if (!fullText) {
-      return res.status(500).json({ error: 'Failed to extract content from Gemini stream.' });
-    }
 
-    // 返回一个完整的JSON响应
-    res.status(200).json({ report: fullText });
+if (!fullText) {
+  return res.status(500).json({ error: 'Failed to extract content from Gemini stream.' });
+}
+
+// 返回一个完整的JSON响应
+res.status(200).json({ report: fullText });
+
+// ... (catch 块)
+
 
   } catch (error) {
     console.error('Proxy internal error:', error);
